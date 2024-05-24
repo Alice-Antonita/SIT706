@@ -1,0 +1,165 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: CloudFormation Template for Application Stack
+
+Parameters:
+  VPC:
+    Type: String
+    Description: VPC ID
+  PublicSubnet1Id:
+    Type: String
+    Description: Public Subnet 1 ID
+  PublicSubnet2Id:
+    Type: String
+    Description: Public Subnet 2 ID
+  PrivateSubnet1Id:
+    Type: String
+    Description: Private Subnet 1 ID
+  PrivateSubnet2Id:
+    Type: String
+    Description: Private Subnet 2 ID
+
+Resources:
+  cfALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Ref VPC
+      GroupDescription: Allow HTTP and HTTPS traffic
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+
+  cfEC2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Ref VPC
+      GroupDescription: Allow HTTP and SSH traffic
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+
+  cfWordpressEC2Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t2.micro
+      ImageId: ami-095c1261450fef6d7
+      KeyName: wordpresskey  
+      SecurityGroupIds:
+        - !Ref cfEC2SecurityGroup
+      SubnetId: !Ref PublicSubnet1Id
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          yum -y update
+          yum -y install php httpd mysql
+          amazon-linux-extras install php7.4 -y
+          yum -y install php-mbstring php-xml
+          wget http://wordpress.org/latest.tar.gz -P /tmp/
+          tar zxvf /tmp/latest.tar.gz -C /tmp
+          cp -r /tmp/wordpress/* /var/www/html/
+          chown apache:apache -R /var/www/html
+          systemctl enable httpd.service
+          systemctl start httpd.service
+
+  cfALB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: cfWordpressAlb
+      Subnets:
+        - !Ref PublicSubnet1Id
+        - !Ref PublicSubnet2Id
+      SecurityGroups:
+        - !Ref cfALBSecurityGroup
+      Scheme: internet-facing
+
+  cfALBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref cfALBTargetGroup
+      LoadBalancerArn: !Ref cfALB
+      Port: 80
+      Protocol: HTTP
+
+  cfALBTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: cfWordpressTargetGroup
+      HealthCheckPath: /
+      HealthCheckProtocol: HTTP
+      HealthCheckPort: 80
+      Port: 80
+      Protocol: HTTP
+      VpcId: !Ref VPC
+      TargetType: instance
+
+  cfLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: cfWordpressLaunchTemplate
+      LaunchTemplateData:
+        InstanceType: t2.micro
+        ImageId: ami-095c1261450fef6d7
+        SecurityGroupIds:
+          - !Ref cfEC2SecurityGroup
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            yum -y update
+            yum -y install php httpd mysql
+            amazon-linux-extras install php7.4 -y
+            yum -y install php-mbstring php-xml
+            wget http://wordpress.org/latest.tar.gz -P /tmp/
+            tar zxvf /tmp/latest.tar.gz -C /tmp
+            cp -r /tmp/wordpress/* /var/www/html/
+            chown apache:apache -R /var/www/html
+            systemctl enable httpd.service
+            systemctl start httpd.service
+
+  cfAutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      VPCZoneIdentifier:
+        - !Ref PublicSubnet1Id
+        - !Ref PublicSubnet2Id
+      LaunchTemplate:
+        LaunchTemplateId: !Ref cfLaunchTemplate
+        Version: !GetAtt cfLaunchTemplate.LatestVersionNumber
+      MinSize: 1
+      MaxSize: 3
+      DesiredCapacity: 1
+      TargetGroupARNs:
+        - !Ref cfALBTargetGroup
+
+  cfRDSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Ref VPC
+      GroupDescription: Allow MySQL access
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          CidrIp: 0.0.0.0/0
+
+  cfs3bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: cfwordpressmediabucket
+
+Outputs:
+  ALBEndpoint:
+    Description: ALB Endpoint
+    Value: !GetAtt cfALB.DNSName
